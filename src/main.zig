@@ -178,10 +178,10 @@ fn residueAtom(structure: zgeom.structure.Structure, res: zgeom.structure.Residu
     return zgeom.structure.findResidueAtom(structure, res, name, altloc) catch null;
 }
 
-fn peptideLinked(structure: zgeom.structure.Structure, left: zgeom.structure.Residue, right: zgeom.structure.Residue, altloc: ?[]const u8) bool {
+fn peptideLinked(structure: zgeom.structure.Structure, left: zgeom.structure.Residue, right: zgeom.structure.Residue, left_alt: []const u8, right_alt: []const u8) bool {
     if (left.segment != right.segment or !std.mem.eql(u8, left.chain, right.chain)) return false;
-    const c = residueAtom(structure, left, "C", altloc) orelse return false;
-    const n = residueAtom(structure, right, "N", altloc) orelse return false;
+    const c = residueAtom(structure, left, "C", left_alt) orelse return false;
+    const n = residueAtom(structure, right, "N", right_alt) orelse return false;
     return zgeom.geometry.distance(c.pos, n.pos) <= 2.0;
 }
 
@@ -204,19 +204,24 @@ fn runBackbone(io: std.Io, allocator: std.mem.Allocator, args: []const []const u
     const residue_list = try zgeom.structure.residues(structure, allocator, model, options.chain);
     defer allocator.free(residue_list);
     if (residue_list.len == 0) return error.NoResidues;
+    const selected_alts = try allocator.alloc([]const u8, residue_list.len);
+    defer allocator.free(selected_alts);
+    for (residue_list, 0..) |res, idx|
+        selected_alts[idx] = zgeom.structure.resolveResidueAlt(structure, res, options.altloc);
 
     const stdout = std.Io.File.stdout();
     var buffer: [8192]u8 = undefined;
     var output = stdout.writer(io, &buffer);
     const writer = &output.interface;
-    if (options.format == .tsv) try writer.print("model\tchain\tresidue_number\tinsertion_code\tresidue_name\tphi_{s}\tpsi_{s}\tomega_{s}\n", .{ unitName(unit), unitName(unit), unitName(unit) });
-    if (options.format == .csv) try writer.print("model,chain,residue_number,insertion_code,residue_name,phi_{s},psi_{s},omega_{s}\n", .{ unitName(unit), unitName(unit), unitName(unit) });
+    if (options.format == .tsv) try writer.print("model\tchain\tresidue_number\tinsertion_code\tresidue_name\taltloc\tphi_{s}\tpsi_{s}\tomega_{s}\n", .{ unitName(unit), unitName(unit), unitName(unit) });
+    if (options.format == .csv) try writer.print("model,chain,residue_number,insertion_code,residue_name,altloc,phi_{s},psi_{s},omega_{s}\n", .{ unitName(unit), unitName(unit), unitName(unit) });
     if (options.format == .json) try writer.writeAll("[\n");
 
     for (residue_list, 0..) |res, idx| {
-        const n = residueAtom(structure, res, "N", options.altloc);
-        const ca = residueAtom(structure, res, "CA", options.altloc);
-        const c = residueAtom(structure, res, "C", options.altloc);
+        const selected_alt = selected_alts[idx];
+        const n = residueAtom(structure, res, "N", selected_alt);
+        const ca = residueAtom(structure, res, "CA", selected_alt);
+        const c = residueAtom(structure, res, "C", selected_alt);
         // Microheterogeneous sites may use one author residue number for
         // different component IDs in different conformers. Report the
         // component associated with the selected backbone coordinates rather
@@ -225,11 +230,11 @@ fn runBackbone(io: std.Io, allocator: std.mem.Allocator, args: []const []const u
         var phi: ?f64 = null;
         var psi: ?f64 = null;
         var omega: ?f64 = null;
-        if (idx > 0 and peptideLinked(structure, residue_list[idx - 1], res, options.altloc))
-            phi = torsion4(residueAtom(structure, residue_list[idx - 1], "C", options.altloc), n, ca, c);
-        if (idx + 1 < residue_list.len and peptideLinked(structure, res, residue_list[idx + 1], options.altloc)) {
-            const next_n = residueAtom(structure, residue_list[idx + 1], "N", options.altloc);
-            const next_ca = residueAtom(structure, residue_list[idx + 1], "CA", options.altloc);
+        if (idx > 0 and peptideLinked(structure, residue_list[idx - 1], res, selected_alts[idx - 1], selected_alt))
+            phi = torsion4(residueAtom(structure, residue_list[idx - 1], "C", selected_alts[idx - 1]), n, ca, c);
+        if (idx + 1 < residue_list.len and peptideLinked(structure, res, residue_list[idx + 1], selected_alt, selected_alts[idx + 1])) {
+            const next_n = residueAtom(structure, residue_list[idx + 1], "N", selected_alts[idx + 1]);
+            const next_ca = residueAtom(structure, residue_list[idx + 1], "CA", selected_alts[idx + 1]);
             psi = torsion4(n, ca, c, next_n);
             omega = torsion4(ca, c, next_n, next_ca);
         }
@@ -237,7 +242,7 @@ fn runBackbone(io: std.Io, allocator: std.mem.Allocator, args: []const []const u
         switch (options.format) {
             .tsv, .csv => {
                 const separator: u8 = if (options.format == .tsv) '\t' else ',';
-                try writer.print("{d}{c}{s}{c}{s}{c}{s}{c}{s}{c}", .{ model, separator, res.chain, separator, res.seq, separator, res.ins, separator, residue_name, separator });
+                try writer.print("{d}{c}{s}{c}{s}{c}{s}{c}{s}{c}{s}{c}", .{ model, separator, res.chain, separator, res.seq, separator, res.ins, separator, residue_name, separator, selected_alt, separator });
                 try writeOptional(writer, phi, unit, "NA");
                 try writer.writeByte(separator);
                 try writeOptional(writer, psi, unit, "NA");
@@ -255,6 +260,8 @@ fn runBackbone(io: std.Io, allocator: std.mem.Allocator, args: []const []const u
                 try writeJsonString(writer, res.ins);
                 try writer.writeAll(",\"residue_name\":");
                 try writeJsonString(writer, residue_name);
+                try writer.writeAll(",\"altloc\":");
+                try writeJsonString(writer, selected_alt);
                 try writer.writeAll(",\"phi\":");
                 try writeOptional(writer, phi, unit, "null");
                 try writer.writeAll(",\"psi\":");
@@ -277,7 +284,7 @@ fn reportError(err: anyerror) noreturn {
     if (err == error.WriteFailed) std.process.exit(0);
     const exit_code: u8 = switch (err) {
         error.MissingArgument, error.MissingOptionValue, error.InvalidOptionValue, error.UnknownOption, error.InvalidAtomSpec, error.InvalidUnit => 2,
-        error.AtomNotFound, error.ModelNotFound, error.NoResidues, error.NoAtoms, error.UnsupportedFormat, error.TruncatedPdbAtom, error.MissingCifColumn, error.InvalidModel, error.InvalidStructureNumber, error.IncompleteCifRow => 3,
+        error.AtomNotFound, error.ModelNotFound, error.NoResidues, error.NoAtoms, error.UnsupportedFormat, error.TruncatedPdbAtom, error.MissingCifColumn, error.InvalidModel, error.InvalidStructureNumber, error.IncompleteCifRow, error.NonContiguousResidue, error.InvalidCompressedInput => 3,
         error.UndefinedGeometry => 4,
         else => 1,
     };

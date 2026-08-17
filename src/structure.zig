@@ -110,12 +110,13 @@ fn stableId(value: []const u8) u32 {
 pub fn load(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !Structure {
     const raw = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024 * 1024));
     const source = if (raw.len >= 2 and raw[0] == 0x1f and raw[1] == 0x8b) decompress: {
+        errdefer allocator.free(raw);
         var source_reader: std.Io.Reader = .fixed(raw);
         var window: [std.compress.flate.max_window_len]u8 = undefined;
         var decompressor: std.compress.flate.Decompress = .init(&source_reader, .gzip, &window);
         var output: std.Io.Writer.Allocating = .init(allocator);
         errdefer output.deinit();
-        _ = try decompressor.reader.streamRemaining(&output.writer);
+        _ = decompressor.reader.streamRemaining(&output.writer) catch return error.InvalidCompressedInput;
         if (output.writer.buffered().len > 1024 * 1024 * 1024) return error.StreamTooLong;
         const decompressed = try output.toOwnedSlice();
         allocator.free(raw);
@@ -324,6 +325,114 @@ pub const Residue = struct {
     segment: u32,
 };
 
+const ResidueKey = struct {
+    segment: u32,
+    chain: []const u8,
+    seq: []const u8,
+    ins: []const u8,
+};
+
+const ResidueKeyContext = struct {
+    pub fn hash(_: @This(), key: ResidueKey) u64 {
+        var hasher = std.hash.Wyhash.init(key.segment);
+        hasher.update(key.chain);
+        hasher.update(&.{0});
+        hasher.update(key.seq);
+        hasher.update(&.{0});
+        hasher.update(key.ins);
+        return hasher.final();
+    }
+
+    pub fn eql(_: @This(), a: ResidueKey, b: ResidueKey) bool {
+        return a.segment == b.segment and
+            std.mem.eql(u8, a.chain, b.chain) and
+            std.mem.eql(u8, a.seq, b.seq) and
+            std.mem.eql(u8, a.ins, b.ins);
+    }
+};
+
+fn residueKey(atom: Atom) ResidueKey {
+    return .{ .segment = atom.segment, .chain = atom.chain, .seq = atom.seq, .ins = atom.ins };
+}
+
+fn validateContiguousResidues(structure: Structure, allocator: std.mem.Allocator, model: u32) !void {
+    var seen: std.HashMapUnmanaged(ResidueKey, void, ResidueKeyContext, 80) = .empty;
+    defer seen.deinit(allocator);
+    var current: ?ResidueKey = null;
+    for (structure.atoms) |atom| {
+        if (atom.model != model or !atom.polymer_hint) continue;
+        const key = residueKey(atom);
+        if (current) |previous| {
+            if (ResidueKeyContext.eql(.{}, previous, key)) continue;
+        }
+        const entry = try seen.getOrPut(allocator, key);
+        if (entry.found_existing) return error.NonContiguousResidue;
+        current = key;
+    }
+}
+
+fn preferredAlt(candidate: []const u8, current: []const u8) bool {
+    if (std.mem.eql(u8, candidate, "A") and !std.mem.eql(u8, current, "A")) return true;
+    if (!std.mem.eql(u8, candidate, "A") and std.mem.eql(u8, current, "A")) return false;
+    return std.mem.order(u8, candidate, current) == .lt;
+}
+
+/// Select one named conformer for an entire residue. Blank-altloc atoms are
+/// shared by every conformer and therefore do not participate in the score.
+/// The default uses the greatest mean occupancy across rows carrying each
+/// named altloc; exact ties prefer A, then lexical order. An explicit request
+/// is used wherever the residue has named alternates; blank-only residues
+/// report a blank label because all of their atoms are shared.
+pub fn resolveResidueAlt(structure: Structure, residue: Residue, requested: ?[]const u8) []const u8 {
+    var best_alt: []const u8 = "";
+    var best_total: f64 = 0.0;
+    var best_count: usize = 0;
+    const atoms = structure.atoms[residue.atom_start..residue.atom_end];
+    if (requested) |alt| {
+        // A residue containing only blank/shared atoms has no alternate
+        // conformer to report. If named alternatives do exist, retain the
+        // request even when that label is absent: lookups then expose missing
+        // coordinates rather than silently falling back to another label.
+        for (atoms) |atom| if (atom.alt.len != 0) return alt;
+        return "";
+    }
+    for (atoms, 0..) |candidate, candidate_idx| {
+        if (candidate.alt.len == 0) continue;
+        var already_scored = false;
+        for (atoms[0..candidate_idx]) |earlier| {
+            if (std.mem.eql(u8, earlier.alt, candidate.alt)) {
+                already_scored = true;
+                break;
+            }
+        }
+        if (already_scored) continue;
+
+        var total: f64 = 0.0;
+        var count: usize = 0;
+        for (atoms) |atom| {
+            if (!std.mem.eql(u8, atom.alt, candidate.alt)) continue;
+            total += atom.occupancy;
+            count += 1;
+        }
+        if (best_count == 0) {
+            best_alt = candidate.alt;
+            best_total = total;
+            best_count = count;
+            continue;
+        }
+        const candidate_weighted = total * @as(f64, @floatFromInt(best_count));
+        const best_weighted = best_total * @as(f64, @floatFromInt(count));
+        if (candidate_weighted > best_weighted or
+            (candidate_weighted == best_weighted and preferredAlt(candidate.alt, best_alt)))
+        {
+            best_alt = candidate.alt;
+            best_total = total;
+            best_count = count;
+        }
+    }
+    return best_alt;
+}
+
 /// Resolve one atom inside a residue discovered by `residues`. Restricting the
 /// scan to the residue's contiguous atom range keeps backbone analysis linear
 /// in structure size rather than rescanning all atoms for every torsion.
@@ -345,6 +454,7 @@ pub fn findResidueAtom(structure: Structure, residue: Residue, name: []const u8,
 }
 
 pub fn residues(structure: Structure, allocator: std.mem.Allocator, model: u32, chain_filter: ?[]const u8) ![]Residue {
+    try validateContiguousResidues(structure, allocator, model);
     var result = std.ArrayListUnmanaged(Residue).empty;
     errdefer result.deinit(allocator);
     for (structure.atoms, 0..) |atom, atom_idx| {
@@ -417,6 +527,49 @@ test "load stable PDB and mmCIF fixtures" {
     const residue_list = try residues(cif, allocator, 1, null);
     defer allocator.free(residue_list);
     try std.testing.expectEqual(@as(usize, 2), residue_list.len);
+}
+
+test "residue-level altloc selection avoids mixed backbone conformers" {
+    const allocator = std.testing.allocator;
+    var pdb = try load(std.testing.io, allocator, "tests/fixtures/coherent_altloc.pdb");
+    defer pdb.deinit();
+    const residue_list = try residues(pdb, allocator, 1, null);
+    defer allocator.free(residue_list);
+
+    try std.testing.expectEqual(@as(usize, 2), residue_list.len);
+    const first_alt = resolveResidueAlt(pdb, residue_list[0], null);
+    try std.testing.expectEqualStrings("A", first_alt);
+    try std.testing.expectEqualStrings("A", (try findResidueAtom(pdb, residue_list[0], "N", first_alt)).alt);
+    try std.testing.expectEqualStrings("A", (try findResidueAtom(pdb, residue_list[0], "CA", first_alt)).alt);
+    try std.testing.expectEqualStrings("A", (try findResidueAtom(pdb, residue_list[0], "C", first_alt)).alt);
+
+    try std.testing.expectEqualStrings("B", resolveResidueAlt(pdb, residue_list[0], "B"));
+    try std.testing.expectEqualStrings("", resolveResidueAlt(pdb, residue_list[1], "B"));
+}
+
+test "non-contiguous residue atom rows are rejected" {
+    const allocator = std.testing.allocator;
+    var cif = try load(std.testing.io, allocator, "tests/fixtures/noncontiguous_residue.cif");
+    defer cif.deinit();
+    try std.testing.expectError(error.NonContiguousResidue, residues(cif, allocator, 1, null));
+}
+
+test "recognized modified amino acid HETATM rows remain protein backbone" {
+    const allocator = std.testing.allocator;
+    var pdb = try load(std.testing.io, allocator, "tests/fixtures/modified_protein.pdb");
+    defer pdb.deinit();
+    const residue_list = try residues(pdb, allocator, 1, null);
+    defer allocator.free(residue_list);
+    try std.testing.expectEqual(@as(usize, 2), residue_list.len);
+    try std.testing.expectEqualStrings("MSE", residue_list[0].name);
+    try std.testing.expectEqualStrings("GLY", residue_list[1].name);
+}
+
+test "corrupt gzip input is a malformed structure error" {
+    try std.testing.expectError(
+        error.InvalidCompressedInput,
+        load(std.testing.io, std.testing.allocator, "tests/fixtures/corrupt.cif.gz"),
+    );
 }
 
 test "blank chain atom spec and explicit PDB TER segments" {
