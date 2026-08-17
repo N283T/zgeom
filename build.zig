@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const version = "0.1.0";
+const version = "0.2.0";
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -46,6 +46,10 @@ pub fn build(b: *std.Build) void {
     const pdb_fixture = b.path("tests/fixtures/edge_cases.pdb");
     const cif_fixture = b.path("tests/fixtures/simple.cif");
     const ter_fixture = b.path("tests/fixtures/ter_break.pdb");
+    const coherent_altloc_fixture = b.path("tests/fixtures/coherent_altloc.pdb");
+    const noncontiguous_fixture = b.path("tests/fixtures/noncontiguous_residue.cif");
+    const modified_protein_fixture = b.path("tests/fixtures/modified_protein.pdb");
+    const corrupt_gzip_fixture = b.path("tests/fixtures/corrupt.cif.gz");
 
     const distance_tsv = b.addRunArtifact(exe);
     distance_tsv.addArg("distance");
@@ -99,9 +103,9 @@ pub fn build(b: *std.Build) void {
     backbone_tsv.addArg("backbone");
     backbone_tsv.addFileArg(cif_fixture);
     backbone_tsv.expectStdOutEqual(
-        "model\tchain\tresidue_number\tinsertion_code\tresidue_name\tphi_degree\tpsi_degree\tomega_degree\n" ++
-            "1\tA\t1\t\tALA\tNA\t180.000000\t180.000000\n" ++
-            "1\tA\t2\t\tGLY\t180.000000\tNA\tNA\n",
+        "model\tchain\tresidue_number\tinsertion_code\tresidue_name\taltloc\tphi_degree\tpsi_degree\tomega_degree\n" ++
+            "1\tA\t1\t\tALA\t\tNA\t180.000000\t180.000000\n" ++
+            "1\tA\t2\t\tGLY\t\t180.000000\tNA\tNA\n",
     );
     test_step.dependOn(&backbone_tsv.step);
 
@@ -111,8 +115,8 @@ pub fn build(b: *std.Build) void {
     backbone_json.addArgs(&.{ "--format", "json" });
     backbone_json.expectStdOutEqual(
         "[\n" ++
-            "  {\"model\":1,\"chain\":\"A\",\"residue_number\":\"1\",\"insertion_code\":\"\",\"residue_name\":\"ALA\",\"phi\":null,\"psi\":180.000000,\"omega\":180.000000,\"unit\":\"degree\"},\n" ++
-            "  {\"model\":1,\"chain\":\"A\",\"residue_number\":\"2\",\"insertion_code\":\"\",\"residue_name\":\"GLY\",\"phi\":180.000000,\"psi\":null,\"omega\":null,\"unit\":\"degree\"}\n" ++
+            "  {\"model\":1,\"chain\":\"A\",\"residue_number\":\"1\",\"insertion_code\":\"\",\"residue_name\":\"ALA\",\"altloc\":\"\",\"phi\":null,\"psi\":180.000000,\"omega\":180.000000,\"unit\":\"degree\"},\n" ++
+            "  {\"model\":1,\"chain\":\"A\",\"residue_number\":\"2\",\"insertion_code\":\"\",\"residue_name\":\"GLY\",\"altloc\":\"\",\"phi\":180.000000,\"psi\":null,\"omega\":null,\"unit\":\"degree\"}\n" ++
             "]\n",
     );
     test_step.dependOn(&backbone_json.step);
@@ -121,11 +125,56 @@ pub fn build(b: *std.Build) void {
     ter_backbone.addArg("backbone");
     ter_backbone.addFileArg(ter_fixture);
     ter_backbone.expectStdOutEqual(
-        "model\tchain\tresidue_number\tinsertion_code\tresidue_name\tphi_degree\tpsi_degree\tomega_degree\n" ++
-            "1\tA\t1\t\tALA\tNA\tNA\tNA\n" ++
-            "1\tA\t2\t\tGLY\tNA\tNA\tNA\n",
+        "model\tchain\tresidue_number\tinsertion_code\tresidue_name\taltloc\tphi_degree\tpsi_degree\tomega_degree\n" ++
+            "1\tA\t1\t\tALA\t\tNA\tNA\tNA\n" ++
+            "1\tA\t2\t\tGLY\t\tNA\tNA\tNA\n",
     );
     test_step.dependOn(&ter_backbone.step);
+
+    const coherent_altloc_backbone = b.addRunArtifact(exe);
+    coherent_altloc_backbone.addArg("backbone");
+    coherent_altloc_backbone.addFileArg(coherent_altloc_fixture);
+    coherent_altloc_backbone.expectStdOutEqual(
+        "model\tchain\tresidue_number\tinsertion_code\tresidue_name\taltloc\tphi_degree\tpsi_degree\tomega_degree\n" ++
+            "1\tA\t1\t\tALA\tA\tNA\t180.000000\t180.000000\n" ++
+            "1\tA\t2\t\tGLY\t\t180.000000\tNA\tNA\n",
+    );
+    test_step.dependOn(&coherent_altloc_backbone.step);
+
+    const requested_altloc_backbone = b.addRunArtifact(exe);
+    requested_altloc_backbone.addArg("backbone");
+    requested_altloc_backbone.addFileArg(coherent_altloc_fixture);
+    requested_altloc_backbone.addArgs(&.{ "--altloc", "B" });
+    requested_altloc_backbone.expectStdOutEqual(
+        "model\tchain\tresidue_number\tinsertion_code\tresidue_name\taltloc\tphi_degree\tpsi_degree\tomega_degree\n" ++
+            "1\tA\t1\t\tALA\tB\tNA\t-135.000000\t180.000000\n" ++
+            "1\tA\t2\t\tGLY\t\t135.000000\tNA\tNA\n",
+    );
+    test_step.dependOn(&requested_altloc_backbone.step);
+
+    const noncontiguous_backbone = b.addRunArtifact(exe);
+    noncontiguous_backbone.addArg("backbone");
+    noncontiguous_backbone.addFileArg(noncontiguous_fixture);
+    noncontiguous_backbone.expectExitCode(3);
+    noncontiguous_backbone.expectStdOutEqual("");
+    test_step.dependOn(&noncontiguous_backbone.step);
+
+    const modified_protein_backbone = b.addRunArtifact(exe);
+    modified_protein_backbone.addArg("backbone");
+    modified_protein_backbone.addFileArg(modified_protein_fixture);
+    modified_protein_backbone.expectStdOutEqual(
+        "model\tchain\tresidue_number\tinsertion_code\tresidue_name\taltloc\tphi_degree\tpsi_degree\tomega_degree\n" ++
+            "1\tA\t1\t\tMSE\t\tNA\t180.000000\t180.000000\n" ++
+            "1\tA\t2\t\tGLY\t\t180.000000\tNA\tNA\n",
+    );
+    test_step.dependOn(&modified_protein_backbone.step);
+
+    const corrupt_gzip = b.addRunArtifact(exe);
+    corrupt_gzip.addArg("backbone");
+    corrupt_gzip.addFileArg(corrupt_gzip_fixture);
+    corrupt_gzip.expectExitCode(3);
+    corrupt_gzip.expectStdOutEqual("");
+    test_step.dependOn(&corrupt_gzip.step);
 
     const cli_error = b.addRunArtifact(exe);
     cli_error.addArg("not-a-command");
@@ -148,4 +197,13 @@ pub fn build(b: *std.Build) void {
     undefined_geometry.expectExitCode(4);
     undefined_geometry.expectStdOutEqual("");
     test_step.dependOn(&undefined_geometry.step);
+
+    // Optional external-oracle regression. PyMOL is intentionally not a
+    // project dependency, so this lives behind its own explicit build step.
+    const oracle_step = b.step("oracle-test", "Compare 1CRN backbone torsions with installed PyMOL");
+    const pymol_oracle = b.addSystemCommand(&.{ "pymol", "-cq", "-r" });
+    pymol_oracle.setEnvironmentVariable("ZGEOM_ORACLE_ROOT", b.pathFromRoot("."));
+    pymol_oracle.addFileArg(b.path("tests/oracle/compare_1crn_pymol.py"));
+    pymol_oracle.step.dependOn(b.getInstallStep());
+    oracle_step.dependOn(&pymol_oracle.step);
 }

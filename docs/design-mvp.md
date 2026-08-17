@@ -59,12 +59,15 @@ model column rather than average values implicitly.
 
 ### Altloc policy
 
-Default selection favors a blank site, otherwise maximum occupancy. This is a
-deterministic pragmatic default, not a claim that independently selected
-maximum-occupancy atoms form a physical conformer. `--altloc` exists for a
-coherent named conformer and still accepts shared blank atoms. Strict atom-level
-`@ALT` is provided for inspecting a particular site. The resolved label is
-printed for arbitrary measurements.
+Scalar selection favors a blank site, otherwise maximum occupancy. Backbone
+analysis instead resolves one named conformer per residue, then uses only that
+label plus blank/shared atoms for `N`, `CA`, and `C`. The default label has the
+greatest mean occupancy across its named atom rows; exact ties prefer `A`, then
+lexical order. This avoids nonphysical atom-by-atom mixtures without biasing
+the score toward conformers that happen to contain more atom rows. `--altloc`
+overrides the label. Strict atom-level `@ALT` remains available for inspecting
+a particular site. Resolved scalar labels and the backbone `altloc` column make
+both policies auditable.
 
 ### Backbone breaks
 
@@ -105,8 +108,10 @@ deferred until a real high-throughput query format is designed.
    rule together.
 7. Protein-backbone classification uses a small recognized residue set
    (including MSE, SEC, and PYL), with mmCIF `label_seq_id` as an additional
-   polymer signal. Extend this deliberately when a modified-residue fixture is
-   added rather than treating nucleic acids or every ligand as protein.
+   polymer signal. MSE is covered by a committed `HETATM` fixture. Residues
+   outside the explicit set remain excluded until a fixture and standard-
+   backbone interpretation are reviewed, rather than treating nucleic acids
+   or every ligand as protein.
 
 ## Hardening decisions after independent review
 
@@ -116,8 +121,16 @@ deferred until a real high-throughput query format is designed.
   pass linear rather than rescanning the whole structure for every residue.
 - Microheterogeneous output uses the component ID of the selected CA (falling
   back to N or C), rather than the first component row at that author site.
+- Protein residue atom rows must be contiguous. A repeated residue after a
+  different protein residue is rejected with exit status 3 rather than being
+  silently split or partially scanned.
 - Non-finite coordinates/occupancies and incomplete final atom-site rows are
   rejected as malformed structures with exit status 3.
+- A gzip stream that cannot be decompressed is likewise classified as malformed
+  structure input and exits with status 3 rather than a generic status 1.
 - CIF reserved words, category names, and tags are matched case-insensitively.
 - Torsion collinearity is tested relative to bond-vector scale, so changing
   coordinate units does not change whether geometry is classified degenerate.
+- An opt-in 1CRN oracle regression compares all 135 defined phi/psi/omega
+  values directly with PyMOL 3.x at a 0.001-degree tolerance. It is separate
+  from the dependency-free default test step.

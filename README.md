@@ -1,5 +1,7 @@
 # zgeom
 
+[![CI](https://github.com/N283T/zgeom/actions/workflows/ci.yml/badge.svg)](https://github.com/N283T/zgeom/actions/workflows/ci.yml)
+
 `zgeom` is a small, standalone Zig CLI for reproducible geometry measurements
 in biomolecular structures. The first MVP calculates distances, three-atom
 angles, signed four-atom dihedrals, and protein backbone `phi`/`psi`/`omega`.
@@ -37,9 +39,20 @@ Requires Zig 0.16.0 or newer.
 ```bash
 zig build -Doptimize=ReleaseFast
 zig build test --summary all
+
+# Optional: compare all 135 defined 1CRN backbone torsions with installed PyMOL
+zig build oracle-test --summary all
 ```
 
 The executable is written to `zig-out/bin/zgeom`.
+`oracle-test` requires PyMOL 3.x but PyMOL is not a project dependency.
+
+GitHub Actions runs the dependency-free test suite natively on Linux x86_64,
+macOS aarch64, and Windows x86_64. It also cross-compiles release binaries for
+x86_64/aarch64 Linux, macOS, and Windows. CI downloads Zig 0.16.0 directly from
+the official `ziglang.org` release archive and verifies the platform-specific
+SHA-256 published in the official download index before extraction; no
+third-party Zig setup action is used.
 
 ## Quick start
 
@@ -86,10 +99,15 @@ are represented by an empty chain field, for example `:1:CA`.
 - An atom-level `@ALTLOC` is strict: `@B` only matches conformer B.
 - `--altloc B` admits conformer B plus atoms with a blank altloc, which allows
   a complete conformer to be assembled from shared atoms.
-- Without either option, a blank altloc wins. If none is blank, the highest
-  occupancy wins; occupancy ties prefer `A`, then lexical order.
-- Output atom labels include the altloc actually selected, so an implicit
-  choice remains auditable.
+- For scalar queries without either option, a blank atom site wins. If none is
+  blank, the highest-occupancy atom wins; ties prefer `A`, then lexical order.
+- For `backbone`, one named conformer is selected per residue and reused for
+  `N`, `CA`, and `C`. The greatest mean occupancy across rows belonging to each
+  named conformer wins; exact ties prefer `A`, then lexical order. Blank-altloc
+  atoms are shared by every conformer and do not affect this score.
+- Scalar atom labels and the backbone `altloc` column expose the resolved
+  choice. Blank-only residues have a blank `altloc`, including when a global
+  `--altloc` was requested, because they have no named conformer.
 
 Selection must resolve to one logical atom. A missing model or atom is an
 error; zgeom never silently substitutes another residue or model.
@@ -118,13 +136,20 @@ distinct residues. A PDB `TER` record is always a hard break even if the chain
 identifier is reused and coordinates happen to be close. In mmCIF, different
 `label_asym_id` values are also hard segment boundaries.
 
+All atom rows for one protein residue must be contiguous in the atom table.
+If a residue reappears after another protein residue in the same model and
+segment, `backbone` rejects the input with status 3 instead of silently
+splitting or partially scanning that residue.
+
 ## Models and input records
 
 Both `ATOM` and `HETATM` records are retained for arbitrary measurements.
 Backbone rows are limited to a recognized protein-residue set (standard amino
 acids plus ASX, GLX, UNK, MSE, SEC, and PYL), so nucleic acids, waters, and
 ordinary ligands do not create `NA` rows. For mmCIF, a populated `label_seq_id`
-is also required.
+is also required. Modified residues outside this explicit set are currently
+excluded rather than guessed from atom names; extending the set requires a
+reviewed fixture and an unambiguous standard-backbone interpretation.
 `--model N` selects a PDB `MODEL` or mmCIF `pdbx_PDB_model_num`. Without it,
 the numerically lowest model is used (normally model 1). One invocation never
 mixes coordinates across models.
@@ -139,13 +164,15 @@ source file.
 TSV is the default. CSV uses the same columns, and JSON provides typed numbers
 and `null`. Numeric values are printed to six decimal places. Output ordering
 follows coordinate-file residue order and is deterministic.
+Backbone output includes the selected residue-level `altloc` after
+`residue_name`; JSON uses the same field name.
 
 | Status | Meaning |
 | --- | --- |
 | `0` | success (including a downstream pipe closed normally) |
-| `1` | I/O, allocation, malformed numeric data, or unexpected failure |
+| `1` | ordinary I/O, allocation, or unexpected failure |
 | `2` | command-line or atom-specification error |
-| `3` | unsupported/malformed structure, missing model/atom, or empty result |
+| `3` | unsupported/malformed structure (including corrupt gzip), missing model/atom, or empty result |
 | `4` | requested scalar geometry is mathematically undefined |
 
 Diagnostics go to stderr; result data goes to stdout.
@@ -153,9 +180,10 @@ Diagnostics go to stderr; result data goes to stdout.
 ## Validation
 
 Unit and CLI integration tests cover analytic distance/angle/dihedral cases,
-PDB and mmCIF parsing, TSV/CSV/JSON, exit codes, altloc occupancy selection,
-insertion codes, multiple models, blank chain IDs, and explicit PDB `TER`
-boundaries. Development smoke tests additionally use read-only data under
+PDB and mmCIF parsing, TSV/CSV/JSON, exit codes, coherent residue-level altloc
+selection, non-contiguous residue rejection, insertion codes, multiple models,
+blank chain IDs, and explicit PDB `TER` boundaries. Development smoke tests
+additionally use read-only data under
 `/Users/nagaet/pdb`:
 
 - AlphaFold DB PDB and mmCIF structures for clean-input agreement
@@ -169,6 +197,10 @@ boundaries. Development smoke tests additionally use read-only data under
 On an AlphaFold DB structure, distance, angle, and signed dihedral values were
 also checked against PyMOL; differences were below `1e-4` in the reported
 units.
+The committed 1CRN oracle regression compares every defined residue-level
+phi/psi/omega value (135 torsions) directly with PyMOL 3.x using a tolerance of
+0.001 degree. The 1CRN fixture was converted from the local wwPDB mmCIF archive
+with Gemmi 0.7.4 and contains deposited coordinate records only.
 
 ## License
 
