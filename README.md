@@ -1,5 +1,7 @@
 # zgeom
 
+[![CI](https://github.com/N283T/zgeom/actions/workflows/ci.yml/badge.svg)](https://github.com/N283T/zgeom/actions/workflows/ci.yml)
+
 `zgeom` is a small, standalone Zig CLI for reproducible geometry measurements
 in biomolecular structures. The first MVP calculates distances, three-atom
 angles, signed four-atom dihedrals, and protein backbone `phi`/`psi`/`omega`.
@@ -44,6 +46,13 @@ zig build oracle-test --summary all
 
 The executable is written to `zig-out/bin/zgeom`.
 `oracle-test` requires PyMOL 3.x but PyMOL is not a project dependency.
+
+GitHub Actions runs the dependency-free test suite natively on Linux x86_64,
+macOS aarch64, and Windows x86_64. It also cross-compiles release binaries for
+x86_64/aarch64 Linux, macOS, and Windows. CI downloads Zig 0.16.0 directly from
+the official `ziglang.org` release archive and verifies the platform-specific
+SHA-256 published in the official download index before extraction; no
+third-party Zig setup action is used.
 
 ## Quick start
 
