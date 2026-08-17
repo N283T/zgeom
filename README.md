@@ -31,6 +31,7 @@ Deliberately deferred until concrete use cases require them:
 
 The rationale and follow-up decisions are recorded in
 [`docs/design-mvp.md`](docs/design-mvp.md).
+Release history is maintained in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Build and test
 
